@@ -1,0 +1,23 @@
+html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d21; color: #ddd;
+  font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; }
+#drop-hint { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; pointer-events: none; text-align: center; color: #888; }
+#drop-hint h1 { font-weight: 500; color: #bbb; margin: 0 0 8px; }
+#drop-hint.hidden { display: none; }
+#drop-overlay { position: fixed; inset: 12px; border: 3px dashed #5fa8ff; border-radius: 12px;
+  display: none; align-items: center; justify-content: center; font-size: 22px; color: #5fa8ff;
+  background: rgba(20, 40, 70, 0.35); pointer-events: none; }
+#drop-overlay.active { display: flex; }
+#status { position: fixed; left: 12px; bottom: 12px; min-width: 280px; max-width: 520px;
+  background: rgba(0,0,0,0.6); padding: 8px 10px; border-radius: 6px; display: none; }
+#status.visible { display: block; }
+#progress { height: 4px; background: #333; margin-top: 6px; border-radius: 2px; overflow: hidden; }
+#progress-bar { height: 100%; width: 0; background: #5fa8ff; transition: width 0.15s; }
+#pick-readout { position: fixed; left: 12px; top: 12px; background: rgba(0,0,0,0.6); padding: 6px 10px;
+  border-radius: 6px; font-family: ui-monospace, Menlo, Consolas, monospace; display: none; white-space: pre; }
+#pick-readout.visible { display: block; }
+.measure-label { background: rgba(0,0,0,0.75); color: #ffd84a; padding: 2px 6px; border-radius: 4px;
+  font: 12px ui-monospace, Menlo, Consolas, monospace; pointer-events: none; }
+body.measuring #app canvas { cursor: crosshair; }

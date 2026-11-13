@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDG Point Cloud Viewer</title>
+    
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="drop-hint">
+      <h1>PDG Point Cloud Viewer</h1>
+      <p>Drop a <code>.xyz</code> scan and/or a three.js <code>.json</code> model here,<br />or use <b>Load</b> in the panel.</p>
+    </div>
+    <div id="drop-overlay">Drop files to load</div>
+    <div id="status">
+      <div id="status-text"></div>
+      <div id="progress"><div id="progress-bar"></div></div>
+    </div>
+    <div id="pick-readout"></div>
+    <input type="file" id="file-xyz" accept=".xyz,.txt,.pts,.csv" hidden />
+    <input type="file" id="file-json" accept=".json" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
