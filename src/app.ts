@@ -7,6 +7,12 @@ import { Measurements, Picker } from './viewer/Picker';
 import type { WorkerIn, WorkerOut, Vec3 } from './io/xyzTypes';
 import type { Detection } from './io/xyzParse';
 import { UNIT_TO_METRES, formatLength, type DisplayUnit, type Unit } from './io/units';
+import { PlaneLayer } from './viewer/PlaneLayer';
+import { PlanePanel } from './ui/PlanePanel';
+import { DEFAULT_PARAMS, type PlaneParams, type PlaneWorkerIn, type PlaneWorkerOut, type Region } from './analysis/types';
+import { exportPlanesJSON } from './analysis/exportPlanes';
+
+const MAX_FIT_POINTS = 4_000_000;
 
 export interface AppState {
   budgetM: number;
@@ -20,6 +26,11 @@ export interface AppState {
   view: { grid: boolean; bboxes: boolean };
   clip: { enabled: boolean; handles: boolean; minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
   measure: { mode: boolean; unit: DisplayUnit };
+  planes: {
+    show: boolean; opacity: number; deviation: boolean; rotationFound: string; rotationOverride: string;
+    toleranceIn: number; voxelCm: number; angleDeg: number; bandIn: number; minArea: number; minHole: number;
+    cellCm: number; minPoints: number;
+  };
 }
 
 type ClickMode = 'inspect' | 'measure' | 'placeModel';
@@ -40,7 +51,15 @@ export class App {
     view: { grid: true, bboxes: false },
     clip: { enabled: false, handles: true, minX: 0, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0 },
     measure: { mode: false, unit: 'ft-in' },
+    planes: {
+      show: true, opacity: 0.55, deviation: false, rotationFound: '—', rotationOverride: '',
+      toleranceIn: 1, voxelCm: 5, angleDeg: 10, bandIn: 3, minArea: 0.25, minHole: 0.1, cellCm: 5, minPoints: 200,
+    },
   };
+  readonly planes = new PlaneLayer();
+  readonly planePanel: PlanePanel;
+  private planeWorker: Worker | null = null;
+  private raycaster = new THREE.Raycaster();
 
   /** Called when state changes outside the panel (load finished, etc.). */
   onStateChanged: (() => void) | null = null;
@@ -68,6 +87,8 @@ export class App {
     this.scanBoxHelper.visible = this.modelBoxHelper.visible = false;
     this.viewer.helpers.add(this.scanBoxHelper, this.modelBoxHelper);
     this.model.sourceToWorld = (p) => this.scanSourceToWorld(p);
+    this.viewer.content.add(this.planes.group);
+    this.planePanel = new PlanePanel((id) => this.selectRegion(id), (id) => this.deleteRegion(id));
 
     this.viewer.beforeRender.push(() => {
       const pr = this.viewer.renderer.getPixelRatio();
@@ -80,6 +101,7 @@ export class App {
       } else {
         this.scan.material.uniforms.uSize.value = this.state.scan.size * pr;
       }
+      this.planes.setPointSize(Math.max(this.state.scan.size, 2) * pr);
     });
 
     this.installPointerHandling();
@@ -88,6 +110,10 @@ export class App {
         this.measurements.cancelPending();
         this.section.deselect();
         if (this.clickMode === 'placeModel') this.setClickMode(this.state.measure.mode ? 'measure' : 'inspect');
+      }
+      const tag = (e.target as HTMLElement)?.tagName;
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tag !== 'INPUT' && tag !== 'TEXTAREA' && this.planes.selected >= 0) {
+        this.deleteRegion(this.planes.selected);
       }
     });
   }
@@ -185,6 +211,12 @@ export class App {
       this.model.load(json, file.name);
       this.placementEdited = false;
       this.defaultPlacement();
+      const ud = json?.object?.userData;
+      if (ud?.pdgPlanes) {
+        // Exported planes carry real-world coordinates in the scan's frame: put them straight back.
+        Object.assign(this.state.model, { unit: ud.units, up: ud.upAxis, rotation: 0, placeX: 0, placeY: 0, placeZ: 0 });
+        this.placementEdited = true;
+      }
       this.applyModelStyle();
       this.applyModelTransform();
       if (!this.scan.loaded || !this.firstFitDone) { this.firstFitDone = true; this.fit(false); this.section.fitTo(this.viewer.contentBox()); }
@@ -219,7 +251,7 @@ export class App {
 
   applyScanStyle() {
     const s = this.state.scan;
-    this.scan.group.visible = s.visible;
+    this.scan.group.visible = s.visible && !(this.state.planes.deviation && this.planes.hasResult);
     this.scan.setColourMode(s.colour);
     this.scan.setAttenuate(s.worldSize);
     this.scan.setRound(s.round);
@@ -337,6 +369,18 @@ export class App {
   }
 
   handleClick(clientX: number, clientY: number): THREE.Vector3 | null {
+    if (this.clickMode === 'inspect' && this.planes.hasResult && this.state.planes.show) {
+      const rect = this.viewer.renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+      this.raycaster.setFromCamera(ndc, this.viewer.camera);
+      const id = this.planes.hit(this.raycaster);
+      // only take plane hits that are not hidden by the section box
+      const hitPoint = id >= 0 ? this.raycaster.intersectObject(this.planes.meshes.get(id)!, false)[0]?.point : null;
+      if (id >= 0 && hitPoint && (!this.section.enabled || this.section.box.containsPoint(hitPoint))) {
+        this.selectRegion(id);
+        return hitPoint;
+      }
+    }
     const p = this.picker.pick(clientX, clientY);
     if (!p) {
       if (this.clickMode === 'inspect') this.section.deselect();
@@ -359,6 +403,181 @@ export class App {
       this.readout(p);
     }
     return p;
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // Plane fitting
+  // ------------------------------------------------------------------------------------------
+
+  planeParams(): PlaneParams {
+    const s = this.state.planes;
+    const ov = s.rotationOverride.trim();
+    const rot = ov === '' || ov.toLowerCase() === 'auto' ? null : Number(ov);
+    return {
+      ...DEFAULT_PARAMS,
+      tolerance: s.toleranceIn * 0.0254,
+      voxel: s.voxelCm / 100,
+      angleDeg: s.angleDeg,
+      band: Math.max(s.bandIn, s.toleranceIn) * 0.0254,
+      minArea: s.minArea,
+      minHole: s.minHole,
+      cell: s.cellCm / 100,
+      minPoints: s.minPoints,
+      rotationDeg: rot != null && Number.isFinite(rot) ? rot : null,
+    };
+  }
+
+  /** Collect displayed points (inside the section box when enabled) in world metres. */
+  private collectFitPoints(): Float32Array | null {
+    const src = this.scan.getPositions();
+    if (!src) return null;
+    const m = this.scan.group.matrixWorld.elements;
+    const box = this.section.enabled ? this.section.box : null;
+    const n = src.length / 3;
+    const inside = (k: number, out: number[]) => {
+      const x = src[k * 3], y = src[k * 3 + 1], z = src[k * 3 + 2];
+      out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+      out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+      out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+      return !box || (out[0] >= box.min.x && out[0] <= box.max.x && out[1] >= box.min.y && out[1] <= box.max.y && out[2] >= box.min.z && out[2] <= box.max.z);
+    };
+    const tmp = [0, 0, 0];
+    let count = 0;
+    for (let k = 0; k < n; k++) if (inside(k, tmp)) count++;
+    if (count === 0) return new Float32Array(0);
+    const stride = Math.max(1, Math.ceil(count / MAX_FIT_POINTS));
+    const out = new Float32Array(Math.ceil(count / stride) * 3);
+    let seen = 0, w = 0;
+    for (let k = 0; k < n; k++) {
+      if (!inside(k, tmp)) continue;
+      if (seen++ % stride !== 0) continue;
+      out[w++] = tmp[0]; out[w++] = tmp[1]; out[w++] = tmp[2];
+    }
+    return out.subarray(0, w).slice();
+  }
+
+  fitPlanes(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.scan.loaded) { this.status('Load a scan first.', 0, true); resolve(); return; }
+      const positions = this.collectFitPoints();
+      if (!positions || positions.length < 30) {
+        this.status('No points inside the section box.', 0, true); resolve(); return;
+      }
+      const params = this.planeParams();
+      this.planeWorker?.terminate();
+      const worker = new Worker(new URL('./analysis/planeWorker.ts', import.meta.url), { type: 'module' });
+      this.planeWorker = worker;
+      const scope = this.section.enabled ? 'inside the section box' : 'in the whole scan';
+      const t0 = performance.now();
+      this.status(`Fitting planes to ${fmtCount(positions.length / 3)} points ${scope}…`, 0.05);
+      worker.onmessage = (e: MessageEvent<PlaneWorkerOut>) => {
+        const m = e.data;
+        if (worker !== this.planeWorker) return;
+        if (m.type === 'progress') { this.status(`Fitting planes: ${m.stage}…`, 0.5); return; }
+        worker.terminate();
+        this.planeWorker = null;
+        if (m.type === 'error') { this.status(`Plane fitting failed: ${m.message}`, 0, true); resolve(); return; }
+        const r = m.result;
+        this.planes.setResult(r, m.positions, params.tolerance);
+        this.state.planes.rotationFound = `${r.rotationDeg.toFixed(3)}°${r.rotationAuto ? ' (auto)' : ' (manual)'}`;
+        this.applyPlaneDisplay();
+        this.refreshPlanePanel();
+        this.planePanel.show();
+        const over = r.regions.filter((g) => g.pctOver > 0).length;
+        this.status(
+          `${r.planes.length} planes, ${r.regions.length} regions from ${fmtCount(r.stats.points)} points ${scope} · ` +
+            `rotation ${r.rotationDeg.toFixed(2)}° · ${over} region${over === 1 ? '' : 's'} with points over ${formatLength(params.tolerance, this.state.measure.unit)} · ` +
+            `${((performance.now() - t0) / 1000).toFixed(1)} s`,
+          1,
+          true,
+        );
+        this.onStateChanged?.();
+        resolve();
+      };
+      worker.onerror = (e) => { this.status(`Plane worker error: ${e.message}`, 0, true); resolve(); };
+      const msg: PlaneWorkerIn = { type: 'fit', positions, params };
+      worker.postMessage(msg, [positions.buffer]);
+    });
+  }
+
+  applyPlaneDisplay() {
+    const s = this.state.planes;
+    this.planes.setShowPlanes(s.show);
+    this.planes.setOpacity(s.opacity);
+    this.planes.setShowDeviation(s.deviation);
+    // the deviation view replaces the scan display
+    this.scan.group.visible = this.state.scan.visible && !(s.deviation && this.planes.hasResult);
+    this.viewer.requestRender();
+  }
+
+  /**
+   * Position text for the list: elevation for horizontal planes (scan units); for walls, the
+   * spacing from the first wall on the same axis (so wall-to-wall distances read directly).
+   */
+  private regionPosition(r: Region): string {
+    const u = this.state.scan.unit;
+    const toUnits = (m: number) => (m / UNIT_TO_METRES[this.scan.unit]).toFixed(3);
+    if (r.axis === 1) {
+      if (!this.scan.loaded) return `elev ${r.offset.toFixed(3)} m`;
+      const p = this.scan.worldToSource(new THREE.Vector3(...r.normal).multiplyScalar(r.offset));
+      const up = this.state.scan.up === 'Z' ? 2 : 1;
+      return `elev ${p[up].toFixed(3)} ${u}`;
+    }
+    const first = Math.min(...this.planes.regions.filter((g) => g.axis === r.axis).map((g) => g.offset));
+    return `${r.axis === 0 ? 'A1' : 'A3'} +${toUnits(r.offset - first)} ${u}`;
+  }
+
+  refreshPlanePanel() {
+    this.planePanel.render(
+      this.planes.regions,
+      this.planes.selected,
+      (v) => formatLength(v, this.state.measure.unit),
+      (r) => this.regionPosition(r),
+      this.planeParams().tolerance,
+    );
+  }
+
+  selectRegion(id: number) {
+    this.planes.select(id);
+    this.refreshPlanePanel();
+    const r = this.planes.regions.find((g) => g.id === id);
+    if (r) {
+      const f = (v: number) => formatLength(v, this.state.measure.unit);
+      const el = document.getElementById('pick-readout')!;
+      el.textContent = [
+        `Region ${r.id} · ${r.axis === 1 ? 'horizontal' : 'vertical'} · ${this.regionPosition(r)}`,
+        `Area ${r.area.toFixed(2)} m² · ${r.holes.length} opening${r.holes.length === 1 ? '' : 's'}`,
+        `RMS ${f(r.rms)} · max ${f(r.maxDev)} · ${r.pctOver.toFixed(1)}% over tolerance`,
+      ].join('\n');
+      el.classList.add('visible');
+    }
+    this.viewer.requestRender();
+  }
+
+  deleteRegion(id: number) {
+    this.planes.remove(id);
+    this.refreshPlanePanel();
+    document.getElementById('pick-readout')?.classList.remove('visible');
+    this.viewer.requestRender();
+  }
+
+  exportPlanes(): string | null {
+    if (!this.planes.hasResult || !this.planes.regions.length) { this.status('Nothing to export: fit planes first.', 0, true); return null; }
+    const json = exportPlanesJSON(this.planes.regions, this.scan, {
+      source: this.scanFile?.name ?? 'scan',
+      tolerance: this.planeParams().tolerance,
+      rotationDeg: this.planes.result!.rotationDeg,
+    });
+    const text = JSON.stringify(json);
+    const base = (this.scanFile?.name ?? 'scan').replace(/\.[^.]+$/, '');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = `${base}-planes.json`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    this.status(`Exported ${this.planes.regions.length} regions to ${a.download} (three.js JSON, ${this.state.scan.unit}, real-world coordinates).`, 1, true);
+    return text;
   }
 
   private readout(p: THREE.Vector3 | null, distance: number | null = null) {

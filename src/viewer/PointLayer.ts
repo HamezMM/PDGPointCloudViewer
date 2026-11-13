@@ -163,6 +163,11 @@ export class PointLayer {
     return !!this.points;
   }
 
+  /** The displayed (sampled) positions, file units relative to `origin`. */
+  getPositions(): Float32Array | null {
+    return this.points ? (this.points.geometry.getAttribute('position').array as Float32Array) : null;
+  }
+
   setUnit(unit: Unit) { this.unit = unit; this.applyTransform(); }
   setUp(up: UpAxis) { this.up = up; this.applyTransform(); }
 

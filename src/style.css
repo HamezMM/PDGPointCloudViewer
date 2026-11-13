@@ -21,3 +21,20 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d21; col
 .measure-label { background: rgba(0,0,0,0.75); color: #ffd84a; padding: 2px 6px; border-radius: 4px;
   font: 12px ui-monospace, Menlo, Consolas, monospace; pointer-events: none; }
 body.measuring #app canvas { cursor: crosshair; }
+#plane-panel { position: fixed; left: 12px; top: 120px; width: 560px; max-width: calc(100vw - 360px);
+  background: rgba(16,18,22,0.88); border-radius: 6px; display: none; font-size: 12px; }
+#plane-panel.visible { display: block; }
+#plane-panel .pp-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px;
+  border-bottom: 1px solid #333; font-weight: 600; }
+#plane-panel .pp-toggle, #plane-panel .pp-del { background: none; border: 0; color: #aaa; cursor: pointer; font-size: 13px; }
+#plane-panel .pp-del:hover { color: #ff6b6b; }
+#plane-panel .pp-scroll { max-height: 38vh; overflow: auto; }
+#plane-panel.collapsed .pp-scroll, #plane-panel.collapsed .pp-foot { display: none; }
+#plane-panel table { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, Consolas, monospace; }
+#plane-panel th { position: sticky; top: 0; background: #1d2026; text-align: left; font-weight: 500; color: #999; padding: 4px 6px; }
+#plane-panel td { padding: 3px 6px; border-top: 1px solid #262a31; white-space: nowrap; }
+#plane-panel tr { cursor: pointer; }
+#plane-panel tr:hover td { background: #232831; }
+#plane-panel tr.sel td { background: #4a4220; }
+#plane-panel tr.over td:nth-child(7) { color: #ff6bd5; font-weight: 600; }
+#plane-panel .pp-foot { padding: 5px 10px; color: #777; font-size: 11px; border-top: 1px solid #333; }

@@ -38,12 +38,34 @@ Keep model coordinates **local** (internal origin / project base point), then pl
 - Desktop browsers only. A GPU with WebGL2 is needed, and 16 GB RAM is recommended for 20M+ point budgets.
 - ASCII only. LAS/LAZ/E57 are not supported (yet).
 
-## Roadmap: phase 2, orthogonal plane fitting
-Agreed scope, not yet built:
-- Find the building's three dominant axes and fit planes (walls / floors / ceilings) **snapped to those axes**.
-- Use a **1" (25.4 mm)** tolerance both to merge or split adjacent coplanar surfaces and to flag points deviating more than 1" from their plane (heat-map colouring plus per-plane stats).
-- **Export the fitted planes as three.js JSON** in real-world coordinates, with deviation stats in `userData`.
-- Revit cannot import three.js JSON natively. Getting the planes into Revit needs a small pyRevit/C# importer, or a different export format.
+## Planar geometry from the scan (orthogonal plane fitting)
+
+**Planes → Fit planes in section box.** This turns the scan into flat, trimmed faces, snapped to the building's three axes.
+
+1. **Isolate an area** with the section box (a room, a floor). With the box off, the whole loaded scan is used, up to 4M points.
+2. **Fit.** It finds the building's rotation automatically and then fits the planes:
+   - floors and ceilings are exactly level
+   - walls are exactly plumb and at 90° to each other
+3. **Tolerance (default 1").**
+   - Surfaces that are parallel and less than 1" apart are **merged** into one plane.
+   - Surfaces more than 1" apart become **separate** planes, e.g. a wall that steps out 2".
+   - Points more than 1" off their plane are **flagged**.
+4. **Review.** The plane list shows each region's position, area, RMS, max deviation and % of points over tolerance. Click a row or a plane to select it, and press **Del** to remove false planes such as furniture or clutter.
+   - **Position** is the elevation for horizontal planes. For walls, it's the distance from the first wall on the same axis, so wall-to-wall spacing reads directly.
+   - **Deviation view** colours the points: grey = on plane, blue/red = inside/outside up to the tolerance, cyan/magenta = beyond it, dark = not on any plane.
+5. **Export planes (three.js JSON).** Each region is a mesh, an outline with holes for openings, in **real-world scan coordinates** (the same as the `.xyz`, in its units and up axis).
+   - The vertices are stored relative to the scan origin and the group's matrix carries the origin, so there's no precision loss.
+   - Each mesh's `userData` holds the axis, normal, offset, area, RMS, max deviation and % over tolerance.
+   - Loading the export back as a model puts it exactly on the scan.
+
+*Advanced* has settings for the normal voxel size, the axis angle tolerance, the assignment band, the minimum region area, the hole-fill size and the outline cell size.
+
+**Known limits of the plane fitting**
+- Surfaces hidden behind furniture come out as **holes**. Holes under *Fill holes under (m²)* are filled, but a large occluded patch looks like an opening.
+- Only planes on the 3 building axes are found. Sloped, curved and off-axis surfaces are ignored and show as dark in the deviation view.
+- The output is **faces, not wall solids**. Each side of a wall is its own region.
+- Statistics come from the displayed sample, so the maximum deviation can be slightly understated on heavily decimated scans.
+- Revit cannot import three.js JSON natively. It needs a small pyRevit/C# importer or a different export format (not built yet).
 
 ## Development
 
@@ -52,6 +74,8 @@ npm test                                             # parser / sampler / units 
 node scripts/gen-sample.mjs --points 300000          # synthetic room scan + feet model in samples/
 npm run build && npx vite preview --port 4173 &
 npm run e2e                                          # Playwright smoke test (load, align, section, measure)
+node scripts/gen-sample.mjs --points 1500000 --out samples-planes --rotate 17 --window --step --offset-half --bulge
+npm run e2e:planes                                   # plane fitting: detect, select, delete, export, reload
 ```
 
 The e2e test uses the globally installed `playwright` package (`NODE_PATH` may need to point at your global `node_modules`).
@@ -68,4 +92,10 @@ src/
   viewer/SectionBox.ts     clipping box + drag handles
   viewer/Picker.ts         GPU depth picking + measurements
   ui/Panel.ts              lil-gui control panel
+  ui/PlanePanel.ts         fitted plane list
+  analysis/planeFit.ts     orthogonal plane fitting (pure, tested)
+  analysis/grid2d.ts       occupancy grid, hole filling, outline tracing, simplification
+  analysis/planeWorker.ts  runs plane fitting off the main thread
+  analysis/exportPlanes.ts three.js JSON export in real-world coordinates
+  viewer/PlaneLayer.ts     plane meshes and deviation view
 ```

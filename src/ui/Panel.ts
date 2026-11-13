@@ -77,8 +77,34 @@ export function buildPanel(app: App, pickXyz: () => void, pickJson: () => void):
   // ---- Measure ----------------------------------------------------------------------------
   const meas = gui.addFolder('Measure');
   meas.add(s.measure, 'mode').name('Measure mode (click 2 pts)').onChange((v: boolean) => app.setClickMode(v ? 'measure' : 'inspect')).listen();
-  meas.add(s.measure, 'unit', DISPLAY_UNITS).name('Display units').onChange((u: DisplayUnit) => app.measurements.setUnit(u));
+  meas.add(s.measure, 'unit', DISPLAY_UNITS).name('Display units').onChange((u: DisplayUnit) => { app.measurements.setUnit(u); app.refreshPlanePanel(); });
   meas.add({ clear: () => app.measurements.clear() }, 'clear').name('Clear measurements');
+
+  // ---- Planes -----------------------------------------------------------------------------
+  const pl = gui.addFolder('Planes (orthogonal fit)');
+  pl.add({ fit: () => app.fitPlanes() }, 'fit').name('Fit planes in section box');
+  pl.add(s.planes, 'toleranceIn', 0.125, 4, 0.125).name('Tolerance (in)');
+  pl.add(s.planes, 'rotationFound').name('Building rotation').disable().listen();
+  pl.add(s.planes, 'rotationOverride').name('Rotation override (°)');
+  pl.add(s.planes, 'show').name('Show planes').onChange(() => app.applyPlaneDisplay());
+  pl.add(s.planes, 'opacity', 0.05, 1, 0.05).name('Plane opacity').onChange(() => app.applyPlaneDisplay());
+  pl.add(s.planes, 'deviation').name('Deviation view').onChange(() => app.applyPlaneDisplay()).listen();
+  pl.add({ exp: () => app.exportPlanes() }, 'exp').name('Export planes (three.js JSON)');
+  const plHelp = document.createElement('div');
+  plHelp.style.cssText = 'padding:4px 8px 8px;color:#999;font-size:11px;line-height:1.35';
+  plHelp.innerHTML = 'Uses the section box when it is enabled, otherwise the whole scan. Deviation view: grey = on plane, ' +
+    'blue/red = in/out up to the tolerance, <span style="color:#0ff">cyan</span>/<span style="color:#f0d">magenta</span> = beyond it, dark = not on any plane. ' +
+    'Leave override empty for automatic rotation.';
+  pl.domElement.querySelector('.children')?.appendChild(plHelp);
+  const adv = pl.addFolder('Advanced');
+  adv.add(s.planes, 'voxelCm', 2, 20, 1).name('Normal voxel (cm)');
+  adv.add(s.planes, 'angleDeg', 2, 30, 1).name('Axis angle tol (°)');
+  adv.add(s.planes, 'bandIn', 1, 12, 0.5).name('Assign band (in)');
+  adv.add(s.planes, 'minArea', 0.01, 5, 0.01).name('Min region (m²)');
+  adv.add(s.planes, 'minHole', 0, 2, 0.01).name('Fill holes under (m²)');
+  adv.add(s.planes, 'cellCm', 1, 20, 0.5).name('Outline cell (cm)');
+  adv.add(s.planes, 'minPoints', 20, 5000, 10).name('Min points / plane');
+  adv.close();
 
   app.onStateChanged = () => {
     colourCtl.updateDisplay();
